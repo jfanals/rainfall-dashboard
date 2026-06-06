@@ -7,7 +7,7 @@ import { formatDateTime, longDate } from './lib/dates';
 import { getBrowserLocation, withDistances } from './lib/geo';
 import type { GeoPoint, MapRainfallSummary, RainfallResponse, Station } from './types';
 
-const RANGE_OPTIONS = [7, 14, 30, 90];
+const RANGE_OPTIONS = [7, 14, 30];
 const SELECTED_STATION_KEY = 'rainfall-dashboard:selected-station';
 
 function getInitialStationId() {

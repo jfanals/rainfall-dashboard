@@ -8,7 +8,7 @@ A modern React dashboard for recent rainfall readings from UK Environment Agency
 - Interactive OpenStreetMap layer coloured and sized by today’s rainfall
 - Hover a station for a tiny 7-day rainfall chart
 - Click a station to split the screen and show a simple rainfall panel
-- 30-day chart by default, with 7 / 14 / 30 / 90 day toggles
+- 30-day chart by default, with 7 / 14 / 30 day toggles
 - Optional browser location centring
 - 7, 14, 30 and 90 day views
 - Summary cards for today, rolling totals, wettest day and rain days
