@@ -205,6 +205,57 @@ export async function fetchMapRainfall(
   return { date: today, updatedAt: new Date().toISOString(), totals };
 }
 
+export async function fetchMapRainfallIncremental(
+  stationIds: string[],
+  signal?: AbortSignal,
+  onStation?: (stationId: string, summary: MapRainfallSummary) => void,
+  onProgress?: (done: number, total: number) => void,
+): Promise<MapRainfallSummary> {
+  const uniqueStationIds = [...new Set(stationIds)].slice(0, 200);
+  const today = dateKeysEndingToday(1)[0];
+  const totals: MapRainfallSummary['totals'] = {};
+  let completed = 0;
+
+  onProgress?.(completed, uniqueStationIds.length);
+
+  if (uniqueStationIds.length === 0) {
+    return { date: today, updatedAt: new Date().toISOString(), totals };
+  }
+
+  const queue = [...uniqueStationIds];
+  const workers = Array.from({ length: Math.min(8, queue.length) }, async () => {
+    while (queue.length > 0) {
+      const stationId = queue.shift();
+      if (!stationId || signal?.aborted) return;
+
+      const stationTotals: MapRainfallSummary['totals'] = {};
+      try {
+        const url = `${EA_BASE_URL}/id/stations/${encodeURIComponent(stationId)}/readings?date=${today}&parameter=rainfall`;
+        const payload = await fetchJson<{ items?: RawReading[] }>(url, signal);
+        summariseReadings(stationId, payload.items || [], stationTotals);
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        stationTotals[stationId] = { rainfall: 0, readings: 0 };
+      } finally {
+        if (signal?.aborted) return;
+
+        const bucket = stationTotals[stationId] || { rainfall: 0, readings: 0 };
+        bucket.rainfall = Math.round(bucket.rainfall * 100) / 100;
+        totals[stationId] = bucket;
+        completed += 1;
+
+        const summary = { date: today, updatedAt: new Date().toISOString(), totals: { ...totals } };
+        onStation?.(stationId, summary);
+        onProgress?.(completed, uniqueStationIds.length);
+      }
+    }
+  });
+
+  await Promise.all(workers);
+
+  return { date: today, updatedAt: new Date().toISOString(), totals };
+}
+
 export async function fetchRainfall(
   stationId = DEFAULT_STATION_ID,
   days: number,

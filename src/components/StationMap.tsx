@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import L, { type CircleMarker } from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { fetchMapRainfall, fetchRainfall, fetchStations } from '../lib/environmentAgency';
+import { fetchMapRainfallIncremental, fetchRainfall, fetchStations } from '../lib/environmentAgency';
 import type { GeoPoint, MapRainfallSummary, RainfallResponse, Station } from '../types';
 
 type StationMapProps = {
@@ -131,10 +131,16 @@ export function StationMap({
   const userLayerRef = useRef<L.LayerGroup | null>(null);
   const markerMapRef = useRef<Map<string, CircleMarker>>(new Map());
   const hoverCacheRef = useRef<Map<string, RainfallResponse>>(new Map());
+  const mapRainfallRef = useRef<MapRainfallSummary | null>(mapRainfall || null);
   const loadAbortRef = useRef<AbortController | null>(null);
   const lastQueryKeyRef = useRef('');
 
   const mappedStations = useMemo(() => stations.filter(hasMapCoordinates), [stations]);
+  const stationById = useMemo(() => new Map(mappedStations.map((station) => [station.id, station])), [mappedStations]);
+
+  useEffect(() => {
+    mapRainfallRef.current = mapRainfall || null;
+  }, [mapRainfall]);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -167,15 +173,26 @@ export function StationMap({
         const visibleStations = await fetchStations(query, controller.signal);
         onStationsChange(visibleStations);
 
-        const rainfall = await fetchMapRainfall(
+        onMapRainfallChange({
+          date: new Date().toISOString().slice(0, 10),
+          updatedAt: new Date().toISOString(),
+          totals: {},
+        });
+
+        const rainfall = await fetchMapRainfallIncremental(
           visibleStations.map((station) => station.id),
           controller.signal,
+          (_stationId, summary) => {
+            if (!controller.signal.aborted) onMapRainfallChange(summary);
+          },
           (done, total) => {
             if (!controller.signal.aborted) setLoadingMessage(total > 0 ? `Fetching rainfall ${done}/${total}` : null);
           },
         );
-        onMapRainfallChange(rainfall);
-        if (!controller.signal.aborted) setLoadingMessage(null);
+        if (!controller.signal.aborted) {
+          onMapRainfallChange(rainfall);
+          setLoadingMessage(null);
+        }
         onError(null);
       } catch (cause) {
         if (!controller.signal.aborted) {
@@ -228,12 +245,11 @@ export function StationMap({
     markerMapRef.current.clear();
 
     for (const station of mappedStations) {
-      const todayRainfall = mapRainfall?.totals[station.id]?.rainfall ?? 0;
       const marker = L.circleMarker(
         [station.lat, station.lon],
-        station.id === selectedStation?.id ? selectedStyle(todayRainfall) : rainStyle(todayRainfall),
+        station.id === selectedStation?.id ? selectedStyle(0) : rainStyle(0),
       )
-        .bindTooltip(tooltipContent(station, todayRainfall, hoverCacheRef.current.get(station.id)), {
+        .bindTooltip(tooltipContent(station, 0, hoverCacheRef.current.get(station.id)), {
           className: 'station-tooltip',
           direction: 'top',
           offset: [0, -10],
@@ -241,16 +257,19 @@ export function StationMap({
         })
         .on('mouseover', () => {
           const cached = hoverCacheRef.current.get(station.id);
-          marker.setTooltipContent(tooltipContent(station, todayRainfall, cached));
+          const latestRainfall = mapRainfallRef.current?.totals[station.id]?.rainfall ?? 0;
+          marker.setTooltipContent(tooltipContent(station, latestRainfall, cached));
           if (cached) return;
 
           fetchRainfall(station.id, 7)
             .then((details) => {
               hoverCacheRef.current.set(station.id, details);
-              marker.setTooltipContent(tooltipContent(station, todayRainfall, details));
+              const latestRainfall = mapRainfallRef.current?.totals[station.id]?.rainfall ?? 0;
+              marker.setTooltipContent(tooltipContent(station, latestRainfall, details));
             })
             .catch(() => {
-              marker.setTooltipContent(tooltipContent(station, todayRainfall));
+              const latestRainfall = mapRainfallRef.current?.totals[station.id]?.rainfall ?? 0;
+              marker.setTooltipContent(tooltipContent(station, latestRainfall));
             });
         })
         .on('click', () => {
@@ -260,18 +279,22 @@ export function StationMap({
       marker.addTo(layer);
       markerMapRef.current.set(station.id, marker);
     }
-  }, [mappedStations, mapRainfall, onSelect, selectedStation]);
+  }, [mappedStations, onSelect, selectedStation]);
 
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
     for (const [stationId, marker] of markerMapRef.current) {
+      const station = stationById.get(stationId);
       const todayRainfall = mapRainfall?.totals[stationId]?.rainfall ?? 0;
       marker.setStyle(stationId === selectedStation?.id ? selectedStyle(todayRainfall) : rainStyle(todayRainfall));
+      if (station) {
+        marker.setTooltipContent(tooltipContent(station, todayRainfall, hoverCacheRef.current.get(stationId)));
+      }
       if (stationId === selectedStation?.id) marker.bringToFront();
     }
-  }, [mapRainfall, selectedStation]);
+  }, [mapRainfall, selectedStation, stationById]);
 
   useEffect(() => {
     const map = mapRef.current;
