@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef } from 'react';
-import L, { type CircleMarker, type LatLngBoundsExpression } from 'leaflet';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import L, { type CircleMarker } from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { fetchRainfall } from '../lib/environmentAgency';
+import { fetchMapRainfall, fetchRainfall, fetchStations } from '../lib/environmentAgency';
 import type { GeoPoint, MapRainfallSummary, RainfallResponse, Station } from '../types';
 
 type StationMapProps = {
@@ -10,16 +10,16 @@ type StationMapProps = {
   mapRainfall?: MapRainfallSummary | null;
   userLocation?: GeoPoint | null;
   locationEnabled: boolean;
-  isLoading: boolean;
-  isRainfallLoading: boolean;
   onSelect: (station: Station) => void;
   onUseLocation: () => void;
+  onStationsChange: (stations: Station[]) => void;
+  onMapRainfallChange: (rainfall: MapRainfallSummary) => void;
+  onError: (message: string | null) => void;
 };
 
 type MappedStation = Station & { lat: number; lon: number };
 
-const UK_CENTRE: L.LatLngExpression = [52.8, -1.7];
-const DEFAULT_ZOOM = 6;
+const INITIAL_CENTRE: L.LatLngExpression = [50.691845, -1.308358];
 const REGION_ZOOM = 10;
 
 const baseMarkerStyle: L.CircleMarkerOptions = {
@@ -93,11 +93,23 @@ function tooltipContent(station: Station, todayRainfall = 0, details?: RainfallR
       <div class="station-tooltip-card__today">Today: <b>${formatMm(todayRainfall)}</b></div>
       ${
         details
-          ? `<div class="mini-chart" aria-hidden="true">${miniChart(details)}</div><small>Last 7 days: ${formatMm(total7)} · click to open full details</small>`
-          : '<div class="mini-chart mini-chart--loading">Loading 7-day chart…</div><small>Click to open full details</small>'
+          ? `<div class="mini-chart" aria-hidden="true">${miniChart(details)}</div><small>Last 7 days: ${formatMm(total7)} · tap for details</small>`
+          : '<div class="mini-chart mini-chart--loading">Loading 7-day chart…</div><small>Tap for details</small>'
       }
     </div>
   `;
+}
+
+function visibleStationQuery(map: L.Map) {
+  const center = map.getCenter();
+  const bounds = map.getBounds();
+  const radiusKm = Math.min(120, Math.max(3, center.distanceTo(bounds.getNorthEast()) / 1000));
+
+  return {
+    lat: Number(center.lat.toFixed(5)),
+    lon: Number(center.lng.toFixed(5)),
+    distKm: Math.ceil(radiusKm),
+  };
 }
 
 export function StationMap({
@@ -106,18 +118,21 @@ export function StationMap({
   mapRainfall,
   userLocation,
   locationEnabled,
-  isLoading,
-  isRainfallLoading,
   onSelect,
   onUseLocation,
+  onStationsChange,
+  onMapRainfallChange,
+  onError,
 }: StationMapProps) {
+  const [isLoadingVisibleStations, setIsLoadingVisibleStations] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
   const layerRef = useRef<L.LayerGroup | null>(null);
   const userLayerRef = useRef<L.LayerGroup | null>(null);
   const markerMapRef = useRef<Map<string, CircleMarker>>(new Map());
   const hoverCacheRef = useRef<Map<string, RainfallResponse>>(new Map());
-  const hasSetInitialViewRef = useRef(false);
+  const loadAbortRef = useRef<AbortController | null>(null);
+  const lastQueryKeyRef = useRef('');
 
   const mappedStations = useMemo(() => stations.filter(hasMapCoordinates), [stations]);
 
@@ -125,11 +140,11 @@ export function StationMap({
     if (!containerRef.current || mapRef.current) return;
 
     const map = L.map(containerRef.current, {
-      center: UK_CENTRE,
-      zoom: DEFAULT_ZOOM,
+      center: INITIAL_CENTRE,
+      zoom: REGION_ZOOM,
       preferCanvas: true,
       scrollWheelZoom: true,
-      zoomControl: true,
+      zoomControl: false,
     });
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -137,31 +152,70 @@ export function StationMap({
       maxZoom: 18,
     }).addTo(map);
 
+    async function loadVisibleStations() {
+      const query = visibleStationQuery(map);
+      const queryKey = `${query.lat}:${query.lon}:${query.distKm}`;
+      if (queryKey === lastQueryKeyRef.current) return;
+      lastQueryKeyRef.current = queryKey;
+
+      loadAbortRef.current?.abort();
+      const controller = new AbortController();
+      loadAbortRef.current = controller;
+      setIsLoadingVisibleStations(true);
+
+      try {
+        const visibleStations = await fetchStations(query, controller.signal);
+        onStationsChange(visibleStations);
+        const rainfall = await fetchMapRainfall(visibleStations.map((station) => station.id), controller.signal);
+        onMapRainfallChange(rainfall);
+        onError(null);
+      } catch (cause) {
+        if (!controller.signal.aborted) {
+          onError(cause instanceof Error ? cause.message : 'Unable to load visible stations.');
+        }
+      } finally {
+        if (!controller.signal.aborted) setIsLoadingVisibleStations(false);
+      }
+    }
+
+    let debounce: number | undefined;
+    const scheduleLoad = () => {
+      window.clearTimeout(debounce);
+      debounce = window.setTimeout(loadVisibleStations, 220);
+    };
+
     layerRef.current = L.layerGroup().addTo(map);
     userLayerRef.current = L.layerGroup().addTo(map);
     mapRef.current = map;
 
+    map.on('moveend zoomend', scheduleLoad);
+
     const resizeObserver = new ResizeObserver(() => {
       map.invalidateSize({ animate: false });
+      scheduleLoad();
     });
     resizeObserver.observe(containerRef.current);
-    setTimeout(() => map.invalidateSize(), 0);
+    setTimeout(() => {
+      map.invalidateSize();
+      loadVisibleStations();
+    }, 0);
 
     return () => {
+      loadAbortRef.current?.abort();
+      window.clearTimeout(debounce);
       resizeObserver.disconnect();
+      map.off('moveend zoomend', scheduleLoad);
       map.remove();
       mapRef.current = null;
       layerRef.current = null;
       userLayerRef.current = null;
       markerMapRef.current.clear();
-      hasSetInitialViewRef.current = false;
     };
-  }, []);
+  }, [onError, onMapRainfallChange, onStationsChange]);
 
   useEffect(() => {
-    const map = mapRef.current;
     const layer = layerRef.current;
-    if (!map || !layer) return;
+    if (!layer) return;
 
     layer.clearLayers();
     markerMapRef.current.clear();
@@ -199,19 +253,7 @@ export function StationMap({
       marker.addTo(layer);
       markerMapRef.current.set(station.id, marker);
     }
-
-    if (!hasSetInitialViewRef.current && mappedStations.length > 0) {
-      if (hasMapCoordinates(selectedStation)) {
-        map.setView([selectedStation.lat, selectedStation.lon], REGION_ZOOM, { animate: false });
-      } else if (userLocation) {
-        map.setView([userLocation.lat, userLocation.lon], REGION_ZOOM, { animate: false });
-      } else {
-        const bounds = mappedStations.map((station) => [station.lat, station.lon]) as LatLngBoundsExpression;
-        map.fitBounds(bounds, { padding: [22, 22], maxZoom: DEFAULT_ZOOM });
-      }
-      hasSetInitialViewRef.current = true;
-    }
-  }, [mappedStations, mapRainfall, onSelect, selectedStation, userLocation]);
+  }, [mappedStations, mapRainfall, onSelect, selectedStation]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -221,10 +263,6 @@ export function StationMap({
       const todayRainfall = mapRainfall?.totals[stationId]?.rainfall ?? 0;
       marker.setStyle(stationId === selectedStation?.id ? selectedStyle(todayRainfall) : rainStyle(todayRainfall));
       if (stationId === selectedStation?.id) marker.bringToFront();
-    }
-
-    if (hasMapCoordinates(selectedStation)) {
-      map.setView([selectedStation.lat, selectedStation.lon], Math.max(map.getZoom(), REGION_ZOOM), { animate: true });
     }
   }, [mapRainfall, selectedStation]);
 
@@ -250,23 +288,12 @@ export function StationMap({
   }, [userLocation]);
 
   return (
-    <section className="panel map-panel map-panel--primary" aria-labelledby="map-title">
-      <div className="panel__heading panel__heading--compact">
-        <div>
-          <p className="eyebrow">Main interface</p>
-          <h2 id="map-title">Rainfall on the map</h2>
-        </div>
-        <div className="map-actions">
-          <button className="ghost-button" type="button" onClick={onUseLocation}>
-            {locationEnabled ? 'Centred near you' : 'Use my location'}
-          </button>
-          <span className="map-badge">
-            {isLoading || isRainfallLoading
-              ? 'Loading rain layer…'
-              : `${mappedStations.length.toLocaleString()} stations · coloured by today’s rainfall`}
-          </span>
-        </div>
-      </div>
+    <section className="panel map-panel map-panel--primary" aria-label="Rainfall map">
+      <button className="target-button" type="button" onClick={onUseLocation} aria-label="Use my location" title="Use my location">
+        {locationEnabled ? '◎' : '⌖'}
+      </button>
+
+      {isLoadingVisibleStations ? <div className="map-loading-pill">Loading visible stations…</div> : null}
 
       <div className="station-map" aria-label="Map of rainfall monitoring stations coloured by today’s rainfall">
         <div ref={containerRef} className="station-map__canvas" />
@@ -278,10 +305,6 @@ export function StationMap({
           <span><i className="legend-dot legend-dot--very-heavy" />10+ mm</span>
         </div>
       </div>
-
-      <p className="hint map-hint">
-        Bigger, warmer circles mean more rain today. Hover for a tiny 7-day chart; click a station to load the full dashboard below.
-      </p>
     </section>
   );
 }

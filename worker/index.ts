@@ -104,8 +104,19 @@ async function fetchEnvironmentAgency<T>(url: string, cacheSeconds: number): Pro
   return response.json() as Promise<T>;
 }
 
-async function handleStations() {
-  const url = `${EA_BASE_URL}/id/stations?parameter=rainfall&_limit=10000`;
+async function handleStations(requestUrl: URL) {
+  const lat = Number(requestUrl.searchParams.get('lat'));
+  const lon = Number(requestUrl.searchParams.get('lon'));
+  const requestedDist = Number(requestUrl.searchParams.get('dist') || '30');
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return json({ error: 'lat and lon query parameters are required.' }, { status: 400 });
+  }
+
+  const dist = Math.min(Math.max(Number.isFinite(requestedDist) ? requestedDist : 30, 1), 120);
+  const url = `${EA_BASE_URL}/id/stations?parameter=rainfall&lat=${encodeURIComponent(lat)}&long=${encodeURIComponent(
+    lon,
+  )}&dist=${encodeURIComponent(dist)}&_limit=500`;
   const payload = await fetchEnvironmentAgency<{ items?: RawStation[] }>(url, STATION_CACHE_SECONDS);
   const stations = (payload.items || [])
     .map(normaliseStation)
@@ -151,40 +162,31 @@ function buildDailyRainfall(readings: RawReading[], days: number, stationId: str
   };
 }
 
-function stationIdFromMeasure(measure?: string): string | undefined {
-  const notation = measure?.split('/').pop();
-  return notation?.split('-rainfall-')[0];
-}
-
-async function handleMapRainfall() {
+async function handleMapRainfall(requestUrl: URL) {
   const today = dateKeysEndingToday(1)[0];
+  const stationIds = [...new Set((requestUrl.searchParams.get('stations') || '').split(',').filter(Boolean))]
+    .filter((stationId) => /^[A-Za-z0-9_-]+$/.test(stationId))
+    .slice(0, 200);
   const totals: Record<string, { rainfall: number; readings: number; latestReadingAt?: string }> = {};
-  let offset = 0;
 
-  while (offset < 50_000) {
-    const upstream = `${EA_BASE_URL}/data/readings?date=${today}&parameter=rainfall&_limit=10000&_offset=${offset}`;
-    const payload = await fetchEnvironmentAgency<{ items?: RawReading[] }>(upstream, API_CACHE_SECONDS);
-    const items = payload.items || [];
-    if (items.length === 0) break;
-
-    for (const reading of items) {
-      const stationId = stationIdFromMeasure(reading.measure);
-      if (!stationId || typeof reading.value !== 'number') continue;
+  await Promise.all(
+    stationIds.map(async (stationId) => {
+      const upstream = `${EA_BASE_URL}/id/stations/${encodeURIComponent(stationId)}/readings?date=${today}&parameter=rainfall`;
+      const payload = await fetchEnvironmentAgency<{ items?: RawReading[] }>(upstream, API_CACHE_SECONDS);
       const bucket = (totals[stationId] ||= { rainfall: 0, readings: 0 });
-      bucket.rainfall += reading.value;
-      bucket.readings += 1;
-      if (reading.dateTime && (!bucket.latestReadingAt || reading.dateTime > bucket.latestReadingAt)) {
-        bucket.latestReadingAt = reading.dateTime;
+
+      for (const reading of payload.items || []) {
+        if (typeof reading.value !== 'number') continue;
+        bucket.rainfall += reading.value;
+        bucket.readings += 1;
+        if (reading.dateTime && (!bucket.latestReadingAt || reading.dateTime > bucket.latestReadingAt)) {
+          bucket.latestReadingAt = reading.dateTime;
+        }
       }
-    }
 
-    if (items.length < 10_000) break;
-    offset += 10_000;
-  }
-
-  for (const bucket of Object.values(totals)) {
-    bucket.rainfall = Math.round(bucket.rainfall * 100) / 100;
-  }
+      bucket.rainfall = Math.round(bucket.rainfall * 100) / 100;
+    }),
+  );
 
   return json(
     {
@@ -226,8 +228,8 @@ async function handleApi(request: Request) {
   try {
     if (request.method === 'OPTIONS') return json({ ok: true });
     if (request.method !== 'GET') return json({ error: 'Method not allowed.' }, { status: 405 });
-    if (url.pathname === '/api/stations') return handleStations();
-    if (url.pathname === '/api/map-rainfall') return handleMapRainfall();
+    if (url.pathname === '/api/stations') return handleStations(url);
+    if (url.pathname === '/api/map-rainfall') return handleMapRainfall(url);
     if (url.pathname === '/api/rainfall') return handleRainfall(url);
     return json({ error: 'Not found.' }, { status: 404 });
   } catch (cause) {

@@ -2,9 +2,9 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { MetricCard } from './components/MetricCard';
 import { RainfallChart } from './components/RainfallChart';
 import { StationMap } from './components/StationMap';
-import { DEFAULT_STATION_ID, fetchMapRainfall, fetchRainfall, fetchStations } from './lib/environmentAgency';
+import { DEFAULT_STATION_ID, fetchRainfall } from './lib/environmentAgency';
 import { formatDateTime, longDate } from './lib/dates';
-import { getBrowserLocation, withDistances } from './lib/geo';
+import { getBrowserLocation } from './lib/geo';
 import type { GeoPoint, MapRainfallSummary, RainfallResponse, Station } from './types';
 
 const RANGE_OPTIONS = [7, 14, 30];
@@ -39,49 +39,16 @@ export default function App() {
   const [rangeDays, setRangeDays] = useState(30);
   const [rainfall, setRainfall] = useState<RainfallResponse | null>(null);
   const [mapRainfall, setMapRainfall] = useState<MapRainfallSummary | null>(null);
-  const [isStationsLoading, setIsStationsLoading] = useState(true);
+  const [selectedStationSnapshot, setSelectedStationSnapshot] = useState<Station | null>(null);
   const [isRainfallLoading, setIsRainfallLoading] = useState(false);
-  const [isMapRainfallLoading, setIsMapRainfallLoading] = useState(false);
   const [locationEnabled, setLocationEnabled] = useState(false);
   const [userLocation, setUserLocation] = useState<GeoPoint | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
 
   useEffect(() => {
-    const controller = new AbortController();
-    setIsStationsLoading(true);
-    fetchStations(controller.signal)
-      .then((items) => {
-        setStations(items);
-        setError(null);
-      })
-      .catch((cause) => {
-        if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Unable to load stations.');
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setIsStationsLoading(false);
-      });
-    return () => controller.abort();
-  }, []);
+    if (!detailsOpen) return;
 
-  useEffect(() => {
-    const controller = new AbortController();
-    setIsMapRainfallLoading(true);
-    fetchMapRainfall(controller.signal)
-      .then((data) => {
-        setMapRainfall(data);
-        setError(null);
-      })
-      .catch((cause) => {
-        if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Unable to load map rainfall.');
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setIsMapRainfallLoading(false);
-      });
-    return () => controller.abort();
-  }, []);
-
-  useEffect(() => {
     const controller = new AbortController();
     setIsRainfallLoading(true);
     fetchRainfall(selectedStationId, rangeDays, controller.signal)
@@ -96,18 +63,11 @@ export default function App() {
         if (!controller.signal.aborted) setIsRainfallLoading(false);
       });
     return () => controller.abort();
-  }, [selectedStationId, rangeDays]);
-
-  useEffect(() => {
-    if (!userLocation || stations.length === 0) return;
-    setStations((current) =>
-      withDistances(current, userLocation).sort((a, b) => (a.distanceKm ?? 9999) - (b.distanceKm ?? 9999)),
-    );
-  }, [userLocation, stations.length]);
+  }, [selectedStationId, rangeDays, detailsOpen]);
 
   const selectedStation = useMemo(
-    () => stations.find((station) => station.id === selectedStationId),
-    [stations, selectedStationId],
+    () => stations.find((station) => station.id === selectedStationId) || (selectedStationSnapshot?.id === selectedStationId ? selectedStationSnapshot : undefined),
+    [stations, selectedStationId, selectedStationSnapshot],
   );
 
   const stats = useMemo(() => {
@@ -132,6 +92,8 @@ export default function App() {
 
   const selectStation = useCallback((station: Station) => {
     setSelectedStationId(station.id);
+    setSelectedStationSnapshot(station);
+    setRainfall(null);
     setDetailsOpen(true);
     localStorage.setItem(SELECTED_STATION_KEY, station.id);
     const url = new URL(window.location.href);
@@ -158,10 +120,11 @@ export default function App() {
         mapRainfall={mapRainfall}
         userLocation={userLocation}
         locationEnabled={locationEnabled}
-        isLoading={isStationsLoading}
-        isRainfallLoading={isMapRainfallLoading}
         onSelect={selectStation}
         onUseLocation={useLocation}
+        onStationsChange={setStations}
+        onMapRainfallChange={setMapRainfall}
+        onError={setError}
       />
 
       {error ? <div className="error-banner map-error" role="alert">{error}</div> : null}

@@ -63,19 +63,34 @@ async function fetchFromWorker<T>(path: string, signal?: AbortSignal): Promise<T
   return fetchJson<T>(path, signal);
 }
 
-export async function fetchStations(signal?: AbortSignal): Promise<Station[]> {
+export type StationQuery = {
+  lat: number;
+  lon: number;
+  distKm: number;
+};
+
+export async function fetchStations(query: StationQuery, signal?: AbortSignal): Promise<Station[]> {
+  const safeDist = Math.min(Math.max(query.distKm, 1), 120);
+  const params = new URLSearchParams({
+    lat: String(query.lat),
+    lon: String(query.lon),
+    dist: String(safeDist),
+  });
+
   try {
-    return await fetchFromWorker<Station[]>('/api/stations', signal);
+    return await fetchFromWorker<Station[]>(`/api/stations?${params}`, signal);
   } catch (error) {
     if (signal?.aborted) throw error;
   }
 
-  const url = `${EA_BASE_URL}/id/stations?parameter=rainfall&_limit=10000`;
+  const url = `${EA_BASE_URL}/id/stations?parameter=rainfall&lat=${encodeURIComponent(query.lat)}&long=${encodeURIComponent(
+    query.lon,
+  )}&dist=${encodeURIComponent(safeDist)}&_limit=500`;
   const payload = await fetchJson<{ items?: RawStation[] }>(url, signal);
   return (payload.items || [])
     .map(normaliseStation)
     .filter((station): station is Station => Boolean(station))
-    .sort((a, b) => a.label.localeCompare(b.label));
+    .sort((a, b) => (a.distanceKm ?? 0) - (b.distanceKm ?? 0) || a.label.localeCompare(b.label));
 }
 
 function buildDailyRainfall(readings: RawReading[], days: number, stationId: string): RainfallResponse {
@@ -116,37 +131,43 @@ function stationIdFromMeasure(measure?: string): string | undefined {
   return notation?.split('-rainfall-')[0];
 }
 
-export async function fetchMapRainfall(signal?: AbortSignal): Promise<MapRainfallSummary> {
+function summariseReadings(stationId: string, readings: RawReading[], totals: MapRainfallSummary['totals']) {
+  const bucket = (totals[stationId] ||= { rainfall: 0, readings: 0 });
+  for (const reading of readings) {
+    if (typeof reading.value !== 'number') continue;
+    bucket.rainfall += reading.value;
+    bucket.readings += 1;
+    if (reading.dateTime && (!bucket.latestReadingAt || reading.dateTime > bucket.latestReadingAt)) {
+      bucket.latestReadingAt = reading.dateTime;
+    }
+  }
+}
+
+export async function fetchMapRainfall(stationIds: string[], signal?: AbortSignal): Promise<MapRainfallSummary> {
+  const uniqueStationIds = [...new Set(stationIds)].slice(0, 200);
+  const today = dateKeysEndingToday(1)[0];
+  const totals: MapRainfallSummary['totals'] = {};
+
+  if (uniqueStationIds.length === 0) {
+    return { date: today, updatedAt: new Date().toISOString(), totals };
+  }
+
   try {
-    return await fetchFromWorker<MapRainfallSummary>('/api/map-rainfall', signal);
+    return await fetchFromWorker<MapRainfallSummary>(
+      `/api/map-rainfall?stations=${encodeURIComponent(uniqueStationIds.join(','))}`,
+      signal,
+    );
   } catch (error) {
     if (signal?.aborted) throw error;
   }
 
-  const today = dateKeysEndingToday(1)[0];
-  const totals: MapRainfallSummary['totals'] = {};
-  let offset = 0;
-
-  while (offset < 50_000) {
-    const url = `${EA_BASE_URL}/data/readings?date=${today}&parameter=rainfall&_limit=10000&_offset=${offset}`;
-    const payload = await fetchJson<{ items?: RawReading[] }>(url, signal);
-    const items = payload.items || [];
-    if (items.length === 0) break;
-
-    for (const reading of items) {
-      const stationId = stationIdFromMeasure(reading.measure);
-      if (!stationId || typeof reading.value !== 'number') continue;
-      const bucket = (totals[stationId] ||= { rainfall: 0, readings: 0 });
-      bucket.rainfall += reading.value;
-      bucket.readings += 1;
-      if (reading.dateTime && (!bucket.latestReadingAt || reading.dateTime > bucket.latestReadingAt)) {
-        bucket.latestReadingAt = reading.dateTime;
-      }
-    }
-
-    if (items.length < 10_000) break;
-    offset += 10_000;
-  }
+  await Promise.all(
+    uniqueStationIds.map(async (stationId) => {
+      const url = `${EA_BASE_URL}/id/stations/${encodeURIComponent(stationId)}/readings?date=${today}&parameter=rainfall`;
+      const payload = await fetchJson<{ items?: RawReading[] }>(url, signal);
+      summariseReadings(stationId, payload.items || [], totals);
+    }),
+  );
 
   for (const bucket of Object.values(totals)) {
     bucket.rainfall = Math.round(bucket.rainfall * 100) / 100;
