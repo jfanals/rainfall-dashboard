@@ -166,15 +166,16 @@ export function StationMap({
       try {
         const visibleStations = await fetchStations(query, controller.signal);
         onStationsChange(visibleStations);
+        if (!controller.signal.aborted) setIsLoadingVisibleStations(false);
+
         const rainfall = await fetchMapRainfall(visibleStations.map((station) => station.id), controller.signal);
         onMapRainfallChange(rainfall);
         onError(null);
       } catch (cause) {
         if (!controller.signal.aborted) {
+          setIsLoadingVisibleStations(false);
           onError(cause instanceof Error ? cause.message : 'Unable to load visible stations.');
         }
-      } finally {
-        if (!controller.signal.aborted) setIsLoadingVisibleStations(false);
       }
     }
 

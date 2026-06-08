@@ -59,7 +59,15 @@ async function fetchJson<T>(url: string, signal?: AbortSignal): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+function canUseSameOriginApi(): boolean {
+  const { hostname, port } = window.location;
+  return hostname.endsWith('workers.dev') || port === '8787';
+}
+
 async function fetchFromWorker<T>(path: string, signal?: AbortSignal): Promise<T> {
+  if (!canUseSameOriginApi()) {
+    throw new Error('Same-origin Worker API is not available on this host.');
+  }
   return fetchJson<T>(path, signal);
 }
 
@@ -161,13 +169,24 @@ export async function fetchMapRainfall(stationIds: string[], signal?: AbortSigna
     if (signal?.aborted) throw error;
   }
 
-  await Promise.all(
-    uniqueStationIds.map(async (stationId) => {
-      const url = `${EA_BASE_URL}/id/stations/${encodeURIComponent(stationId)}/readings?date=${today}&parameter=rainfall`;
-      const payload = await fetchJson<{ items?: RawReading[] }>(url, signal);
-      summariseReadings(stationId, payload.items || [], totals);
-    }),
-  );
+  const queue = [...uniqueStationIds];
+  const workers = Array.from({ length: Math.min(8, queue.length) }, async () => {
+    while (queue.length > 0) {
+      const stationId = queue.shift();
+      if (!stationId || signal?.aborted) return;
+
+      try {
+        const url = `${EA_BASE_URL}/id/stations/${encodeURIComponent(stationId)}/readings?date=${today}&parameter=rainfall`;
+        const payload = await fetchJson<{ items?: RawReading[] }>(url, signal);
+        summariseReadings(stationId, payload.items || [], totals);
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        totals[stationId] ||= { rainfall: 0, readings: 0 };
+      }
+    }
+  });
+
+  await Promise.all(workers);
 
   for (const bucket of Object.values(totals)) {
     bucket.rainfall = Math.round(bucket.rainfall * 100) / 100;
