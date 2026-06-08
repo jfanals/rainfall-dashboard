@@ -18,6 +18,7 @@ type StationMapProps = {
 };
 
 type MappedStation = Station & { lat: number; lon: number };
+type RainfallBucket = MapRainfallSummary['totals'][string];
 
 const INITIAL_CENTRE: L.LatLngExpression = [50.691845, -1.308358];
 const REGION_ZOOM = 10;
@@ -100,6 +101,10 @@ function tooltipContent(station: Station, todayRainfall = 0, details?: RainfallR
   `;
 }
 
+function todayKey(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
 function visibleStationQuery(map: L.Map) {
   const center = map.getCenter();
   const bounds = map.getBounds();
@@ -132,6 +137,8 @@ export function StationMap({
   const markerMapRef = useRef<Map<string, CircleMarker>>(new Map());
   const hoverCacheRef = useRef<Map<string, RainfallResponse>>(new Map());
   const mapRainfallRef = useRef<MapRainfallSummary | null>(mapRainfall || null);
+  const rainfallCacheRef = useRef<Map<string, RainfallBucket>>(new Map());
+  const rainfallCacheDateRef = useRef(todayKey());
   const loadAbortRef = useRef<AbortController | null>(null);
   const lastQueryKeyRef = useRef('');
 
@@ -173,24 +180,67 @@ export function StationMap({
         const visibleStations = await fetchStations(query, controller.signal);
         onStationsChange(visibleStations);
 
+        const date = todayKey();
+        if (rainfallCacheDateRef.current !== date) {
+          rainfallCacheDateRef.current = date;
+          rainfallCacheRef.current.clear();
+        }
+
+        const visibleIds = visibleStations.map((station) => station.id);
+        const visibleTotals: MapRainfallSummary['totals'] = {};
+        const missingIds: string[] = [];
+
+        for (const stationId of visibleIds) {
+          const cached = rainfallCacheRef.current.get(stationId);
+          if (cached) {
+            visibleTotals[stationId] = cached;
+          } else {
+            missingIds.push(stationId);
+          }
+        }
+
         onMapRainfallChange({
-          date: new Date().toISOString().slice(0, 10),
+          date,
           updatedAt: new Date().toISOString(),
-          totals: {},
+          totals: { ...visibleTotals },
         });
 
+        if (missingIds.length === 0) {
+          setLoadingMessage(null);
+          onError(null);
+          return;
+        }
+
         const rainfall = await fetchMapRainfallIncremental(
-          visibleStations.map((station) => station.id),
+          missingIds,
           controller.signal,
-          (_stationId, summary) => {
-            if (!controller.signal.aborted) onMapRainfallChange(summary);
+          (stationId, summary) => {
+            if (controller.signal.aborted) return;
+            const bucket = summary.totals[stationId];
+            if (!bucket) return;
+
+            rainfallCacheRef.current.set(stationId, bucket);
+            visibleTotals[stationId] = bucket;
+            onMapRainfallChange({
+              date,
+              updatedAt: new Date().toISOString(),
+              totals: { ...visibleTotals },
+            });
           },
           (done, total) => {
-            if (!controller.signal.aborted) setLoadingMessage(total > 0 ? `Fetching rainfall ${done}/${total}` : null);
+            if (!controller.signal.aborted) {
+              const cached = visibleIds.length - missingIds.length;
+              const loaded = cached + done;
+              setLoadingMessage(total > 0 ? `Fetching rainfall ${loaded}/${visibleIds.length}` : null);
+            }
           },
         );
         if (!controller.signal.aborted) {
-          onMapRainfallChange(rainfall);
+          for (const [stationId, bucket] of Object.entries(rainfall.totals)) {
+            rainfallCacheRef.current.set(stationId, bucket);
+            visibleTotals[stationId] = bucket;
+          }
+          onMapRainfallChange({ date, updatedAt: new Date().toISOString(), totals: { ...visibleTotals } });
           setLoadingMessage(null);
         }
         onError(null);
