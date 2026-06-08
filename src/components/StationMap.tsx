@@ -124,7 +124,7 @@ export function StationMap({
   onMapRainfallChange,
   onError,
 }: StationMapProps) {
-  const [isLoadingVisibleStations, setIsLoadingVisibleStations] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
   const layerRef = useRef<L.LayerGroup | null>(null);
@@ -161,19 +161,25 @@ export function StationMap({
       loadAbortRef.current?.abort();
       const controller = new AbortController();
       loadAbortRef.current = controller;
-      setIsLoadingVisibleStations(true);
+      setLoadingMessage('Finding visible stations…');
 
       try {
         const visibleStations = await fetchStations(query, controller.signal);
         onStationsChange(visibleStations);
-        if (!controller.signal.aborted) setIsLoadingVisibleStations(false);
 
-        const rainfall = await fetchMapRainfall(visibleStations.map((station) => station.id), controller.signal);
+        const rainfall = await fetchMapRainfall(
+          visibleStations.map((station) => station.id),
+          controller.signal,
+          (done, total) => {
+            if (!controller.signal.aborted) setLoadingMessage(total > 0 ? `Fetching rainfall ${done}/${total}` : null);
+          },
+        );
         onMapRainfallChange(rainfall);
+        if (!controller.signal.aborted) setLoadingMessage(null);
         onError(null);
       } catch (cause) {
         if (!controller.signal.aborted) {
-          setIsLoadingVisibleStations(false);
+          setLoadingMessage(null);
           onError(cause instanceof Error ? cause.message : 'Unable to load visible stations.');
         }
       }
@@ -294,7 +300,7 @@ export function StationMap({
         {locationEnabled ? '◎' : '⌖'}
       </button>
 
-      {isLoadingVisibleStations ? <div className="map-loading-pill">Loading visible stations…</div> : null}
+      {loadingMessage ? <div className="map-loading-pill">{loadingMessage}</div> : null}
 
       <div className="station-map" aria-label="Map of rainfall monitoring stations coloured by today’s rainfall">
         <div ref={containerRef} className="station-map__canvas" />

@@ -151,7 +151,11 @@ function summariseReadings(stationId: string, readings: RawReading[], totals: Ma
   }
 }
 
-export async function fetchMapRainfall(stationIds: string[], signal?: AbortSignal): Promise<MapRainfallSummary> {
+export async function fetchMapRainfall(
+  stationIds: string[],
+  signal?: AbortSignal,
+  onProgress?: (done: number, total: number) => void,
+): Promise<MapRainfallSummary> {
   const uniqueStationIds = [...new Set(stationIds)].slice(0, 200);
   const today = dateKeysEndingToday(1)[0];
   const totals: MapRainfallSummary['totals'] = {};
@@ -169,6 +173,9 @@ export async function fetchMapRainfall(stationIds: string[], signal?: AbortSigna
     if (signal?.aborted) throw error;
   }
 
+  let completed = 0;
+  onProgress?.(completed, uniqueStationIds.length);
+
   const queue = [...uniqueStationIds];
   const workers = Array.from({ length: Math.min(8, queue.length) }, async () => {
     while (queue.length > 0) {
@@ -182,6 +189,9 @@ export async function fetchMapRainfall(stationIds: string[], signal?: AbortSigna
       } catch (error) {
         if (signal?.aborted) throw error;
         totals[stationId] ||= { rainfall: 0, readings: 0 };
+      } finally {
+        completed += 1;
+        onProgress?.(completed, uniqueStationIds.length);
       }
     }
   });
